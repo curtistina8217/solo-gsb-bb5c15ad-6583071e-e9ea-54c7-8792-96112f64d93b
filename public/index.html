@@ -16,13 +16,23 @@
     <div class="col-left">
       <section class="panel inputs">
         <h2>参数</h2>
+        <div class="mode-switch" id="modeSwitch" role="tablist">
+          <button type="button" data-mode="single" class="active">单规格</button>
+          <button type="button" data-mode="multi">多规格共用角度</button>
+        </div>
         <div class="field-row">
-          <label>筒体周长 (mm)
+          <label id="circumferenceField">筒体周长 (mm)
             <input id="circumference" type="number" min="0.01" step="any" value="400" />
           </label>
           <label>接缝安全宽度 (mm)
             <input id="seamWidth" type="number" min="0" step="any" value="20" />
           </label>
+        </div>
+
+        <div id="multiCirc" hidden>
+          <h3>各规格筒体周长 (mm)<button id="addCirc" type="button" class="small">+ 添加规格</button></h3>
+          <div id="circRows"></div>
+          <p class="hint">输入 2～8 个周长，沿用同一接缝宽度与保护区，输出所有规格均安全的角度段</p>
         </div>
 
         <h3>印刷保护区 (mm)<button id="addZone" type="button" class="small">+ 添加</button></h3>
@@ -51,7 +61,7 @@
 
     <section class="panel preview">
       <div id="livePreviewWrap">
-        <h2>预览 <span class="hint">拖动圆盘旋转，自动吸附到最近可行位置</span></h2>
+        <h2 id="previewTitle">预览 <span class="hint">拖动圆盘旋转，自动吸附到最近可行位置</span></h2>
         <canvas id="canvas" width="520" height="520"></canvas>
         <p id="currentPos" class="current-pos"></p>
       </div>
@@ -67,7 +77,7 @@
     </section>
 
     <div class="col-right">
-      <section class="panel results">
+      <section class="panel results" id="singleResults">
         <h2>结果</h2>
         <div id="bestBox" class="best" hidden></div>
         <div id="noSolutionBox" class="no-solution" hidden>
@@ -78,6 +88,19 @@
         <ul id="feasibleList" class="seg-list"></ul>
         <h3>禁用区间（合并后）</h3>
         <ul id="forbiddenList" class="seg-list"></ul>
+      </section>
+
+      <section class="panel results" id="multiResults" hidden>
+        <h2>共用角度结果</h2>
+        <div id="multiBestBox" class="best" hidden></div>
+        <div id="multiConflictBox" class="no-solution" hidden>
+          <strong>无共同解：</strong>各规格可行角度段的圆周交集为空。
+          <div id="conflictList"></div>
+        </div>
+        <h3>共用可行角度段 <span id="commonCount" class="hint"></span></h3>
+        <ul id="commonList" class="seg-list"></ul>
+        <h3>各规格禁用环（角度域）</h3>
+        <div id="specList" class="spec-list"></div>
       </section>
 
       <section class="panel diff-panel" id="diffListPanel" hidden>

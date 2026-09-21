@@ -54,6 +54,45 @@ main {
 
 .field-row { display: flex; gap: 12px; }
 .field-row label { flex: 1; font-size: 13px; color: var(--muted); }
+
+/* 模式切换 */
+.mode-switch {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.mode-switch button {
+  flex: 1;
+  background: #f9fafb;
+  color: var(--muted);
+  border-radius: 0;
+  padding: 8px 6px;
+  font-size: 13px;
+}
+.mode-switch button:hover { filter: none; background: #f3f4f6; }
+.mode-switch button.active { background: var(--blue); color: #fff; }
+
+.circ-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.circ-row label { flex: 1; font-size: 12px; color: var(--muted); position: relative; }
+.circ-row .circ-index { font-weight: 700; color: var(--blue); }
+.circ-row .remove {
+  border: none;
+  background: none;
+  color: var(--red);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  align-self: end;
+  line-height: 30px;
+}
 input[type="number"] {
   width: 100%;
   margin-top: 4px;
@@ -118,6 +157,46 @@ button.small { padding: 3px 10px; font-size: 12px; }
   font-size: 14px;
 }
 .best .num { font-size: 20px; font-weight: 700; }
+.best .per-spec { font-size: 12px; color: #047857; line-height: 1.6; }
+
+/* 多规格结果 */
+.seg-list li.common { flex-direction: column; align-items: stretch; }
+.seg-list li.common > div { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.seg-list li.common .mm-ref {
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+.spec-list { font-size: 12px; }
+.spec-block {
+  border: 1px solid var(--line);
+  border-left: 4px solid #d1d5db;
+  border-radius: 6px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+}
+.spec-block.culprit { border-color: #fcd34d; background: #fffbeb; }
+.spec-head { font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.spec-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+.spec-ranges { color: var(--muted); margin-top: 3px; font-size: 11px; word-break: break-all; }
+.spec-nosol, .spec-culprit {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.spec-nosol { background: #fee2e2; color: #b91c1c; }
+.spec-culprit { background: #fde68a; color: #92400e; }
+.conflict-head { margin-bottom: 6px; }
 
 .no-solution {
   background: #fef2f2;

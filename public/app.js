@@ -7,11 +7,14 @@ const canvas = $('canvas');
 const ctx = canvas.getContext('2d');
 
 const state = {
-  result: null,        // 服务端计算结果
-  lastInput: null,     // 最近一次成功计算的输入（供快照保存/载入）
-  thetaMm: 0,          // 当前接缝位置 (mm, [0, C))
+  mode: 'single',      // 'single' | 'multi'
+  result: null,        // 单规格：服务端计算结果
+  multiResult: null,   // 多规格：服务端计算结果
+  lastInput: null,     // 最近一次成功计算的单规格输入（供快照保存/载入）
+  thetaMm: 0,          // 单规格：当前接缝位置 (mm, [0, C))
+  thetaDeg: 0,         // 多规格：当前共用角度 (°, [0, 360))
   dragging: false,
-  rawMm: null,         // 拖动时未吸附的原始角度
+  rawDeg: null,        // 拖动时未吸附的原始角度（角度域）
   selected: [],        // 选中的快照 id（按选择顺序，最多 2 个）
   currentDiff: null,   // 当前展示的差异结果
 };
@@ -21,7 +24,64 @@ const mod = (n, m) => ((n % m) + m) % m;
 const fmtMm = (x) => String(Math.round(x * 100) / 100);
 const fmtDeg = (x) => (Math.round(x * 10) / 10).toFixed(1);
 
+const MAX_CIRC = 8;
+const SPEC_COLORS = [
+  '#d43a3a', '#e8912d', '#7c3aed', '#0ea5e9',
+  '#db2777', '#65a30d', '#0891b2', '#b45309',
+];
+const specColor = (i) => SPEC_COLORS[i % SPEC_COLORS.length];
+
+/* ---------------- 模式切换 ---------------- */
+
+function setMode(mode) {
+  if (mode !== 'single' && mode !== 'multi') return;
+  state.mode = mode;
+  document.querySelectorAll('#modeSwitch button').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  $('circumferenceField').hidden = mode !== 'single';
+  $('multiCirc').hidden = mode !== 'multi';
+  $('singleResults').hidden = mode !== 'single';
+  $('multiResults').hidden = mode !== 'multi';
+  $('saveSnapshot').disabled = mode === 'multi';
+  $('saveSnapshot').title = mode === 'multi' ? '多规格模式下快照仅保存单规格结果' : '';
+  $('previewTitle').innerHTML =
+    mode === 'multi'
+      ? '预览 <span class="hint">各规格禁用环叠加，外环为共用可行段；拖动吸附到共用段</span>'
+      : '预览 <span class="hint">拖动圆盘旋转，自动吸附到最近可行位置</span>';
+  exitDiffMode();
+  scheduleCompute();
+}
+
+document.querySelectorAll('#modeSwitch button').forEach((btn) => {
+  btn.addEventListener('click', () => setMode(btn.dataset.mode));
+});
+
 /* ---------------- 输入表单 ---------------- */
+
+function addCircRow(value = '') {
+  const row = document.createElement('div');
+  row.className = 'circ-row';
+  row.innerHTML = `
+    <label>规格 <span class="circ-index"></span> 周长 (mm)
+      <input type="number" min="0.01" step="any" class="circ-value" value="${value}">
+    </label>
+    <button type="button" class="remove" title="删除">✕</button>`;
+  row.querySelector('.remove').addEventListener('click', () => {
+    row.remove();
+    refreshCircIndex();
+    scheduleCompute();
+  });
+  row.querySelector('input').addEventListener('input', scheduleCompute);
+  $('circRows').appendChild(row);
+  refreshCircIndex();
+}
+
+function refreshCircIndex() {
+  [...document.querySelectorAll('.circ-row')].forEach((row, i) => {
+    row.querySelector('.circ-index').textContent = i + 1;
+  });
+}
 
 function addZoneRow(start = '', end = '') {
   const row = document.createElement('div');
@@ -39,13 +99,16 @@ function addZoneRow(start = '', end = '') {
 }
 
 function readInputs() {
-  const circumference = parseFloat($('circumference').value);
   const seamWidth = parseFloat($('seamWidth').value);
   const zones = [...document.querySelectorAll('.zone-row')].map((row) => ({
     start: parseFloat(row.querySelector('.z-start').value),
     end: parseFloat(row.querySelector('.z-end').value),
   }));
-  return { circumference, seamWidth, zones };
+  const circumference = parseFloat($('circumference').value);
+  const circumferences = [...document.querySelectorAll('.circ-row .circ-value')].map((el) =>
+    parseFloat(el.value)
+  );
+  return { circumference, circumferences, seamWidth, zones };
 }
 
 /* ---------------- 计算 ---------------- */
@@ -60,9 +123,6 @@ async function compute() {
   const body = readInputs();
   $('error').hidden = true;
 
-  if (!Number.isFinite(body.circumference) || body.circumference <= 0) {
-    return showError('筒体周长必须为大于 0 的数值');
-  }
   if (!Number.isFinite(body.seamWidth) || body.seamWidth < 0) {
     return showError('接缝安全宽度必须为不小于 0 的数值');
   }
@@ -70,12 +130,30 @@ async function compute() {
     return showError('保护区的起点与终点必须为数值 (mm)');
   }
 
+  if (state.mode === 'multi') {
+    if (body.circumferences.some((c) => !Number.isFinite(c) || c <= 0)) {
+      return showError('每个规格的周长必须为大于 0 的数值');
+    }
+    if (body.circumferences.length < 2 || body.circumferences.length > MAX_CIRC) {
+      return showError(`请输入 2～${MAX_CIRC} 个规格周长`);
+    }
+    return computeMulti(body);
+  }
+
+  if (!Number.isFinite(body.circumference) || body.circumference <= 0) {
+    return showError('筒体周长必须为大于 0 的数值');
+  }
+
   let result;
   try {
     const res = await fetch('/api/compute', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        circumference: body.circumference,
+        seamWidth: body.seamWidth,
+        zones: body.zones,
+      }),
     });
     result = await res.json();
     if (!res.ok) return showError(result.error || '计算失败');
@@ -89,6 +167,32 @@ async function compute() {
   if (result.best) state.thetaMm = result.best.mm;
   exitDiffMode();
   renderResults();
+  draw();
+}
+
+async function computeMulti(body) {
+  const payload = {
+    circumferences: body.circumferences,
+    seamWidth: body.seamWidth,
+    zones: body.zones,
+  };
+  let result;
+  try {
+    const res = await fetch('/api/compute-multi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    result = await res.json();
+    if (!res.ok) return showError(result.error || '计算失败');
+  } catch (e) {
+    return showError('无法连接服务器：' + e.message);
+  }
+
+  state.multiResult = result;
+  if (result.best) state.thetaDeg = result.best.deg;
+  exitDiffMode();
+  renderMultiResults();
   draw();
 }
 
@@ -179,6 +283,126 @@ function markActiveSegment() {
   });
 }
 
+/* ---------------- 多规格结果渲染 ---------------- */
+
+function commonSegText(s) {
+  if (s.full) return '0.0° → 360.0°（整圈）';
+  if (s.wraps) {
+    return `${fmtDeg(s.startDeg)}° → 360.0° ｜ 0.0° → ${fmtDeg(s.endDeg)}°（跨零点，宽 ${fmtDeg(s.widthDeg)}°）`;
+  }
+  return `${fmtDeg(s.startDeg)}° → ${fmtDeg(s.endDeg)}°`;
+}
+
+/** 角度段在某规格周长下的毫米范围（处理跨零点展示）。 */
+function commonSegMmText(s, C) {
+  if (s.full) return `0 → ${fmtMm(C)} mm`;
+  const a = (s.startDeg / 360) * C;
+  const b = (s.endDeg / 360) * C;
+  return s.wraps ? `${fmtMm(a)} → ${fmtMm(C)} ｜ 0 → ${fmtMm(b)} mm` : `${fmtMm(a)} → ${fmtMm(b)} mm`;
+}
+
+/** 角度 deg 是否落在（可能跨零、由 startDeg+widthDeg 给出的）共用段内。 */
+function degInCommon(seg, deg) {
+  if (seg.full) return true;
+  const start = mod(seg.startDeg, 360);
+  const end = start + seg.widthDeg;
+  if (end <= 360 + 1e-9) return deg >= start - 1e-9 && deg <= end + 1e-9;
+  return deg >= start - 1e-9 || deg <= end - 360 + 1e-9;
+}
+
+function renderMultiResults() {
+  const r = state.multiResult;
+
+  const bestBox = $('multiBestBox');
+  if (r.best) {
+    bestBox.hidden = false;
+    const perSpec = r.best.perSpec
+      .map(
+        (p) =>
+          `规格 ${p.index + 1}（C=${fmtMm(p.circumference)}）：${fmtMm(p.mm)} mm` +
+          `，最小间隙 ${fmtDeg(p.minClearanceDeg)}° ＝ ${fmtMm(p.minClearanceMm)} mm`
+      )
+      .join('<br>');
+    bestBox.innerHTML =
+      `默认共用角度（各规格下最小间隙最大、并列取较小角度）：<br>` +
+      `<span class="num">${fmtDeg(r.best.deg)}°</span>` +
+      `（最小间隙 ${fmtDeg(r.best.minClearanceDeg)}° ＝ ${fmtMm(r.best.minClearanceMm)} mm）<br>` +
+      `<span class="per-spec">${perSpec}</span>`;
+  } else {
+    bestBox.hidden = true;
+  }
+
+  $('multiConflictBox').hidden = !r.noCommonSolution;
+  if (r.noCommonSolution && r.culprit) {
+    const cu = r.culprit;
+    let html =
+      `<div class="conflict-head">交集在规格 ${cu.index + 1}（周长 ${fmtMm(cu.circumference)} mm）` +
+      `首次归零。冲突区间（归零前共同可行段 ∩ 该规格禁用段）：</div>`;
+    html += cu.conflictPairs
+      .map(
+        (p, i) =>
+          `<div class="chain-item">冲突 ${i + 1}：${fmtDeg(p.overlap[0])}° → ${fmtDeg(p.overlap[1])}°` +
+          `（共同段 ${fmtDeg(p.feasible[0])}° → ${fmtDeg(p.feasible[1])}°` +
+          ` 被禁用段 ${fmtDeg(p.forbidden[0])}° → ${fmtDeg(p.forbidden[1])}° 覆盖）</div>`
+      )
+      .join('');
+    $('conflictList').innerHTML = html;
+  }
+
+  $('commonCount').textContent = r.noCommonSolution
+    ? '（无）'
+    : `（共 ${r.commonSegments.length} 段）`;
+  const cl = $('commonList');
+  cl.innerHTML = '';
+  r.commonSegments.forEach((s) => {
+    const li = document.createElement('li');
+    li.className = 'feasible common';
+    const mmRef = r.specs.map(
+      (sp) => `规格${sp.index + 1}：${commonSegMmText(s, sp.circumference)}`
+    );
+    li.innerHTML =
+      `<div><div>${commonSegText(s)}</div>` +
+      `<div class="tag mm-ref">${mmRef.join('<br>')}</div></div>` +
+      `<span class="tag">宽 ${fmtDeg(s.widthDeg)}°</span>`;
+    li.title = '点击将该段中点设为共用角度';
+    li.addEventListener('click', () => {
+      const mid = s.full ? 0 : mod(s.startDeg + s.widthDeg / 2, 360);
+      state.thetaDeg = mid;
+      markActiveCommon();
+      draw();
+    });
+    cl.appendChild(li);
+  });
+  markActiveCommon();
+
+  const sl = $('specList');
+  sl.innerHTML = '';
+  r.specs.forEach((sp) => {
+    const div = document.createElement('div');
+    div.className = 'spec-block' + (r.culprit && r.culprit.index === sp.index ? ' culprit' : '');
+    const full = sp.forbiddenDeg.length === 1 && sp.forbiddenDeg[0][0] <= 1e-6 &&
+      sp.forbiddenDeg[0][1] >= 360 - 1e-6;
+    const ranges = sp.forbiddenDeg
+      .map(([a, b]) => (a <= 1e-6 && b >= 360 - 1e-6 ? '整圈禁用' : `${fmtDeg(a)}°→${fmtDeg(b)}°`))
+      .join('，');
+    div.innerHTML =
+      `<div class="spec-head"><span class="spec-dot" style="background:${specColor(sp.index)}"></span>` +
+      `规格 ${sp.index + 1}：C=${fmtMm(sp.circumference)} mm，接缝 ${fmtDeg(sp.seamWidthDeg)}°` +
+      (sp.noSolution ? '<span class="spec-nosol">单规格无解</span>' : '') +
+      (r.culprit && r.culprit.index === sp.index ? '<span class="spec-culprit">交集归零</span>' : '') +
+      `</div><div class="spec-ranges">${full ? '禁用：整圈' : '禁用：' + (ranges || '无')}</div>`;
+    sl.appendChild(div);
+  });
+}
+
+function markActiveCommon() {
+  const r = state.multiResult;
+  if (!r || r.noCommonSolution) return;
+  [...$('commonList').children].forEach((li, i) => {
+    li.classList.toggle('active', degInCommon(r.commonSegments[i], state.thetaDeg));
+  });
+}
+
 /* ---------------- 吸附 ---------------- */
 
 /** 将角度 m (mm) 吸附到最近可行位置；无解时返回 null */
@@ -201,6 +425,26 @@ function snapToFeasible(m) {
     const e = s.wraps ? s.endMm + C : s.endMm;
     for (const cand of [mod(s.startMm, C), mod(e, C)]) {
       const d = Math.min(Math.abs(cand - m), C - Math.abs(cand - m));
+      if (!best || d < best.d) best = { d, v: cand };
+    }
+  }
+  return best ? best.v : null;
+}
+
+/** 多规格：将角度 deg 吸附到最近的共用可行位置；无共同解时返回 null。 */
+function snapToCommonFeasible(deg) {
+  const r = state.multiResult;
+  if (!r || r.noCommonSolution) return null;
+  const segs = r.commonSegments;
+  if (segs.length === 0) return null;
+
+  if (segs.some((s) => degInCommon(s, deg))) return deg;
+
+  let best = null;
+  for (const s of segs) {
+    if (s.full) return deg;
+    for (const cand of [mod(s.startDeg, 360), mod(s.startDeg + s.widthDeg, 360)]) {
+      const d = Math.min(Math.abs(cand - deg), 360 - Math.abs(cand - deg));
       if (!best || d < best.d) best = { d, v: cand };
     }
   }
@@ -248,14 +492,35 @@ function drawRingSegments(cx, cy, r, segments, C, color, width) {
   }
 }
 
-function draw() {
-  const r = state.result;
-  const { cx, cy, R, size } = geom();
-  ctx.clearRect(0, 0, size, size);
-  if (!r) return;
-  const C = r.circumference;
+function radDeg(deg) {
+  return (deg / 360) * TAU - Math.PI / 2;
+}
 
-  // 刻度（每 30°）
+function drawDegRing(cx, cy, r, segs, color, width) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'butt';
+  for (const [a, b] of segs) {
+    if (b - a <= 1e-7) continue;
+    ctx.beginPath();
+    if (a <= 1e-7 && b >= 360 - 1e-7) {
+      ctx.arc(cx, cy, r, 0, TAU);
+      ctx.stroke();
+    } else if (b <= 360 + 1e-7) {
+      ctx.arc(cx, cy, r, radDeg(a), radDeg(b), false);
+      ctx.stroke();
+    } else {
+      // 跨零点线性弧：a→360 与 0→(b-360) 两段
+      ctx.arc(cx, cy, r, radDeg(a), radDeg(0) - 0.0001, false);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, radDeg(0), radDeg(b - 360), false);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawTicks(cx, cy, R) {
   ctx.strokeStyle = '#d1d5db';
   ctx.fillStyle = '#9ca3af';
   ctx.lineWidth = 1;
@@ -263,7 +528,7 @@ function draw() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   for (let d = 0; d < 360; d += 30) {
-    const a = rad((d / 360) * C, C);
+    const a = radDeg(d);
     const x1 = cx + (R + 14) * Math.cos(a);
     const y1 = cy + (R + 14) * Math.sin(a);
     const x2 = cx + (R + 22) * Math.cos(a);
@@ -274,6 +539,31 @@ function draw() {
     ctx.stroke();
     ctx.fillText(`${d}°`, cx + (R + 36) * Math.cos(a), cy + (R + 36) * Math.sin(a));
   }
+}
+
+/** 圆周上的指向箭头（与单规格 best 标记同款）。 */
+function drawAngleMarker(cx, cy, r, angleDeg, color) {
+  const ab = radDeg(angleDeg);
+  const bx = cx + r * Math.cos(ab);
+  const by = cy + r * Math.sin(ab);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(bx, by);
+  ctx.lineTo(bx - 6 * Math.cos(ab - 0.35), by - 6 * Math.sin(ab - 0.35));
+  ctx.lineTo(bx - 6 * Math.cos(ab + 0.35), by - 6 * Math.sin(ab + 0.35));
+  ctx.closePath();
+  ctx.fill();
+}
+
+function draw() {
+  if (state.mode === 'multi') return drawMulti();
+  const r = state.result;
+  const { cx, cy, R, size } = geom();
+  ctx.clearRect(0, 0, size, size);
+  if (!r) return;
+  const C = r.circumference;
+
+  drawTicks(cx, cy, R);
 
   // 外环底色
   ctx.strokeStyle = '#e5e7eb';
@@ -384,19 +674,190 @@ function draw() {
   markActiveSegment();
 }
 
+/* ---------------- 多规格 Canvas ---------------- */
+
+function drawMulti() {
+  const r = state.multiResult;
+  const { cx, cy, R, size } = geom();
+  ctx.clearRect(0, 0, size, size);
+  if (!r) return;
+
+  drawTicks(cx, cy, R);
+
+  const n = r.specs.length;
+  const ringW = Math.max(5, Math.min(10, (R - 70) / Math.max(1, n) - 3));
+  const commonR = R;
+  const firstInnerR = R - 30;
+  const ringRadius = (i) => firstInnerR - i * (ringW + 3);
+
+  // 各规格禁用环（由外向内叠加）
+  r.specs.forEach((sp) => {
+    const rr = ringRadius(sp.index);
+    drawDegRing(cx, cy, rr, [[0, 360]], '#eef0f2', ringW);
+    drawDegRing(cx, cy, rr, sp.forbiddenDeg, specColor(sp.index), ringW);
+  });
+
+  // 外环底色 + 共用可行段
+  drawDegRing(cx, cy, commonR, [[0, 360]], '#e5e7eb', 18);
+  if (!r.noCommonSolution) {
+    // 共用段在角度域可能跨零点，拆成 [0,360] 内不跨零弧段
+    const pairs = [];
+    for (const s of r.commonSegments) {
+      if (s.full) {
+        pairs.push([0, 360]);
+      } else if (s.wraps) {
+        pairs.push([s.startDeg, 360]);
+        pairs.push([0, s.endDeg]);
+      } else {
+        pairs.push([s.startDeg, s.endDeg]);
+      }
+    }
+    drawDegRing(cx, cy, commonR, pairs, '#1e9e50', 18);
+  } else if (r.culprit) {
+    // 冲突重叠段在外环高亮
+    const overlaps = r.culprit.conflictPairs.map((p) => p.overlap);
+    drawDegRing(cx, cy, commonR, overlaps, '#b45309', 18);
+  }
+
+  // 各规格在当前角度的接缝位置径向线
+  const theta = state.thetaDeg;
+  r.specs.forEach((sp) => {
+    const rr = ringRadius(sp.index);
+    const a = radDeg(theta);
+    ctx.strokeStyle = specColor(sp.index);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + (rr - ringW / 2 - 2) * Math.cos(a), cy + (rr - ringW / 2 - 2) * Math.sin(a));
+    ctx.lineTo(cx + (rr + ringW / 2 + 2) * Math.cos(a), cy + (rr + ringW / 2 + 2) * Math.sin(a));
+    ctx.stroke();
+  });
+
+  // 共用角度接缝位置线（贯穿）
+  const a0 = radDeg(theta);
+  ctx.strokeStyle = r.noCommonSolution ? '#b45309' : '#2563eb';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(
+    cx + (ringRadius(n - 1) - ringW / 2 - 8) * Math.cos(a0),
+    cy + (ringRadius(n - 1) - ringW / 2 - 8) * Math.sin(a0)
+  );
+  ctx.lineTo(cx + (R + 26) * Math.cos(a0), cy + (R + 26) * Math.sin(a0));
+  ctx.stroke();
+
+  // 拖动时未吸附的原始位置（虚线）
+  if (
+    state.dragging &&
+    state.rawDeg !== null &&
+    Math.abs(mod(state.rawDeg - theta + 180, 360) - 180) > 0.5
+  ) {
+    const ar = radDeg(state.rawDeg);
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#9ca3af';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx + (R - 60) * Math.cos(ar), cy + (R - 60) * Math.sin(ar));
+    ctx.lineTo(cx + (R + 26) * Math.cos(ar), cy + (R + 26) * Math.sin(ar));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 默认共用角度标记
+  if (r.best) drawAngleMarker(cx, cy, R + 10, r.best.deg, '#065f46');
+
+  // 中心文字
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (r.noCommonSolution) {
+    ctx.fillStyle = '#b45309';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText('无共同解', cx, cy - 12);
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#6b7280';
+    ctx.fillText(
+      r.culprit ? `交集在规格 ${r.culprit.index + 1} 首次归零` : '可行角度交集为空',
+      cx,
+      cy + 14
+    );
+  } else {
+    ctx.fillStyle = '#1f2937';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText(`${fmtDeg(theta)}°`, cx, cy - (n - 1) * 6.5 - 12);
+    ctx.font = '11px sans-serif';
+    ctx.fillStyle = '#6b7280';
+    const lines = r.specs.map(
+      (sp) => `规格${sp.index + 1}：${fmtMm((theta / 360) * sp.circumference)} mm`
+    );
+    lines.forEach((line, i) => {
+      ctx.fillText(line, cx, cy + 12 + i * 13);
+    });
+  }
+
+  // 图例：共用可行 / 冲突 + 各规格禁用
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const legend = [];
+  if (r.noCommonSolution) legend.push(['#b45309', '冲突区间']);
+  else legend.push(['#1e9e50', '共用可行段']);
+  r.specs.forEach((sp) => {
+    legend.push([
+      specColor(sp.index),
+      `规格${sp.index + 1}禁用${
+        r.culprit && r.culprit.index === sp.index ? '（交集归零）' : ''
+      }`,
+    ]);
+  });
+  let lx = 12;
+  let ly = size - 16;
+  for (const [color, label] of legend) {
+    const w = 12 + ctx.measureText(label).width + 14;
+    if (lx + w > size - 8) {
+      lx = 12;
+      ly -= 16;
+    }
+    ctx.fillStyle = color;
+    ctx.fillRect(lx, ly - 6, 10, 10);
+    ctx.fillStyle = '#374151';
+    ctx.fillText(label, lx + 14, ly);
+    lx += w;
+  }
+
+  $('currentPos').textContent = r.noCommonSolution
+    ? '当前无所有规格共用的安全角度'
+    : `当前共用角度：${fmtDeg(theta)}°（各规格对应毫米值见图内）`;
+  markActiveCommon();
+}
+
 /* ---------------- 拖动 ---------------- */
 
-function pointerMm(ev) {
+function pointerDeg(ev) {
   const rect = canvas.getBoundingClientRect();
   const { cx, cy, size } = geom();
   const scale = size / rect.width;
   const x = (ev.clientX - rect.left) * scale - cx;
   const y = (ev.clientY - rect.top) * scale - cy;
+  // 0° 在正上方，顺时针为正
+  return mod((Math.atan2(x, -y) / TAU) * 360, 360);
+}
+
+function pointerMm(ev) {
   const C = state.result.circumference;
-  return mod((Math.atan2(x, -y) / TAU) * C, C);
+  return (pointerDeg(ev) / 360) * C;
 }
 
 canvas.addEventListener('pointerdown', (ev) => {
+  if (state.mode === 'multi') {
+    if (!state.multiResult) return;
+    state.dragging = true;
+    canvas.classList.add('dragging');
+    canvas.setPointerCapture(ev.pointerId);
+    state.rawDeg = pointerDeg(ev);
+    const snapped = snapToCommonFeasible(state.rawDeg);
+    if (snapped !== null) state.thetaDeg = snapped;
+    draw();
+    return;
+  }
   if (!state.result) return;
   state.dragging = true;
   canvas.classList.add('dragging');
@@ -408,6 +869,13 @@ canvas.addEventListener('pointerdown', (ev) => {
 });
 canvas.addEventListener('pointermove', (ev) => {
   if (!state.dragging) return;
+  if (state.mode === 'multi') {
+    state.rawDeg = pointerDeg(ev);
+    const snapped = snapToCommonFeasible(state.rawDeg);
+    if (snapped !== null) state.thetaDeg = snapped;
+    draw();
+    return;
+  }
   state.rawMm = pointerMm(ev);
   const snapped = snapToFeasible(state.rawMm);
   if (snapped !== null) state.thetaMm = snapped;
@@ -542,6 +1010,7 @@ function saveSnapshot() {
 function loadSnapshot(id) {
   const s = SnapshotStore.getById(id);
   if (!s) return;
+  setMode('single');
   $('circumference').value = s.input.circumference;
   $('seamWidth').value = s.input.seamWidth;
   $('zones').innerHTML = '';
@@ -697,15 +1166,12 @@ function diffGeom() {
   diffCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { cx: size / 2, cy: size / 2, size };
 }
-function radDeg(deg) {
-  return (deg / 360) * TAU - Math.PI / 2;
-}
 function drawDegArc(c, cy2, r, a0, a1) {
   diffCtx.beginPath();
   diffCtx.arc(c, cy2, r, radDeg(a0), radDeg(a1), false);
   diffCtx.stroke();
 }
-function drawDegRing(cx, cy, r, segs, color, width) {
+function drawDiffDegRing(cx, cy, r, segs, color, width) {
   diffCtx.strokeStyle = color;
   diffCtx.lineWidth = width;
   diffCtx.lineCap = 'butt';
@@ -802,10 +1268,10 @@ function drawDiff() {
   ];
   for (const ring of rings) {
     const set = d[ring.key];
-    drawDegRing(cx, cy, ring.r, [[0, 360]], '#e5e7eb', ring.w);
-    drawDegRing(cx, cy, ring.r, set.common, '#9ca3af', ring.w);
-    drawDegRing(cx, cy, ring.r, set.removed, '#dc2626', ring.w);
-    drawDegRing(cx, cy, ring.r, set.added, '#16a34a', ring.w);
+    drawDiffDegRing(cx, cy, ring.r, [[0, 360]], '#e5e7eb', ring.w);
+    drawDiffDegRing(cx, cy, ring.r, set.common, '#9ca3af', ring.w);
+    drawDiffDegRing(cx, cy, ring.r, set.removed, '#dc2626', ring.w);
+    drawDiffDegRing(cx, cy, ring.r, set.added, '#16a34a', ring.w);
     drawDiffMoves(cx, cy, ring.r, set.moves, ring.w);
   }
 
@@ -869,10 +1335,17 @@ $('addZone').addEventListener('click', () => {
   addZoneRow();
   scheduleCompute();
 });
+$('addCirc').addEventListener('click', () => {
+  if (document.querySelectorAll('.circ-row').length >= MAX_CIRC) return;
+  addCircRow();
+  scheduleCompute();
+});
 $('compute').addEventListener('click', compute);
 $('circumference').addEventListener('input', scheduleCompute);
 $('seamWidth').addEventListener('input', scheduleCompute);
-$('loadExample').addEventListener('click', () => {
+
+function loadSingleExample() {
+  setMode('single');
   $('circumference').value = 400;
   $('seamWidth').value = 20;
   $('zones').innerHTML = '';
@@ -880,6 +1353,25 @@ $('loadExample').addEventListener('click', () => {
   addZoneRow(200, 260);
   addZoneRow(350, 30); // 跨零点保护区
   compute();
+}
+
+function loadMultiExample() {
+  setMode('multi');
+  $('seamWidth').value = 20;
+  $('zones').innerHTML = '';
+  addZoneRow(60, 120);
+  addZoneRow(200, 260);
+  addZoneRow(350, 30); // 跨零点保护区（毫米坐标对各规格一致）
+  $('circRows').innerHTML = '';
+  addCircRow(400);
+  addCircRow(360);
+  addCircRow(440);
+  compute();
+}
+
+$('loadExample').addEventListener('click', () => {
+  if (state.mode === 'multi') loadMultiExample();
+  else loadSingleExample();
 });
 window.addEventListener('resize', () => {
   draw();
@@ -898,5 +1390,9 @@ $('exitDiff').addEventListener('click', () => {
 });
 renderSnapshotList();
 
-// 默认载入示例并计算
-$('loadExample').click();
+// 多规格模式预置 2 个周长（切过去即可直接计算，不影响单规格输入）
+addCircRow(400);
+addCircRow(360);
+
+// 默认载入单规格示例并计算
+loadSingleExample();
