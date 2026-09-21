@@ -16,14 +16,28 @@
     <div class="col-left">
       <section class="panel inputs">
         <h2>参数</h2>
-        <div class="field-row">
-          <label>筒体周长 (mm)
+        <div class="mode-switch" role="tablist">
+          <button type="button" class="mode-btn active" data-mode="single">单规格模式</button>
+          <button type="button" class="mode-btn" data-mode="multi">多规格共用角度（2～8 个周长）</button>
+        </div>
+
+        <div id="singleFields">
+          <label class="full-label">筒体周长 (mm)
             <input id="circumference" type="number" min="0.01" step="any" value="400" />
           </label>
-          <label>接缝安全宽度 (mm)
-            <input id="seamWidth" type="number" min="0" step="any" value="20" />
-          </label>
         </div>
+
+        <div id="multiFields" hidden>
+          <h3>各规格筒体周长 (mm)
+            <button id="addSpec" type="button" class="small">+ 添加规格</button>
+          </h3>
+          <div id="specs"></div>
+          <p class="hint">2～8 个周长，共用同一接缝宽度与保护区，结果统一到角度域求交集</p>
+        </div>
+
+        <label class="full-label seam-label">接缝安全宽度 (mm)
+          <input id="seamWidth" type="number" min="0" step="any" value="20" />
+        </label>
 
         <h3>印刷保护区 (mm)<button id="addZone" type="button" class="small">+ 添加</button></h3>
         <div id="zones"></div>
@@ -51,9 +65,10 @@
 
     <section class="panel preview">
       <div id="livePreviewWrap">
-        <h2>预览 <span class="hint">拖动圆盘旋转，自动吸附到最近可行位置</span></h2>
+        <h2>预览 <span class="hint" id="previewHint">拖动圆盘旋转，自动吸附到最近可行位置</span></h2>
         <canvas id="canvas" width="520" height="520"></canvas>
         <p id="currentPos" class="current-pos"></p>
+        <div id="multiLegend" class="multi-legend" hidden></div>
       </div>
       <div id="diffView" hidden>
         <h2>快照差异 <span class="hint">A → B，按圆周角度比较（周长不同亦可）</span></h2>
@@ -67,7 +82,7 @@
     </section>
 
     <div class="col-right">
-      <section class="panel results">
+      <section class="panel results" id="singleResults">
         <h2>结果</h2>
         <div id="bestBox" class="best" hidden></div>
         <div id="noSolutionBox" class="no-solution" hidden>
@@ -78,6 +93,16 @@
         <ul id="feasibleList" class="seg-list"></ul>
         <h3>禁用区间（合并后）</h3>
         <ul id="forbiddenList" class="seg-list"></ul>
+      </section>
+
+      <section class="panel results" id="multiResults" hidden>
+        <h2>共用角度结果</h2>
+        <div id="multiBestBox" class="best" hidden></div>
+        <div id="multiNoSolutionBox" class="no-solution" hidden></div>
+        <h3>所有规格均安全的角度段 <span id="commonCount" class="hint"></span></h3>
+        <ul id="commonList" class="seg-list"></ul>
+        <h3>各规格概览</h3>
+        <ul id="multiSpecList" class="multi-spec-list"></ul>
       </section>
 
       <section class="panel diff-panel" id="diffListPanel" hidden>
